@@ -1,0 +1,11 @@
+---
+title: principal components of democratic and republic twitter corpus
+---
+
+## democrats
+
+![](democrats.png)
+
+## republicans
+
+![](republicans.png)
