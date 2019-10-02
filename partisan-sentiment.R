@@ -1,115 +1,46 @@
----
-title: using political tweets to build a partisan sentiment classifier
-output:
-  html_document:
-    toc: true
-    toc_float: true
----
-
-## setup
-
-```{r}
 library(tidyverse)
 library(tidytext)
 library(magrittr)
 library(jsonlite)
 library(lubridate)
 library(here)
-library(scales)
 library(ggrepel)
-library(mongolite)
 
-knitr::opts_chunk$set(
-  engine.path = list(
-  sh = "C:/Program Files/Git/bin/sh.exe",
-  bash = "C:/Program Files/Git/bin/bash.exe"
-  ),
-  cache = TRUE
-  )
-```
+# tweets <- "https://files.pushshift.io/misc/political_tweets.ndjson.xz"
 
-## fetch data
+# download.file(
+#   url = tweets,
+#   destfile = here("raw", basename(tweets))
+# )
 
-```{r, eval=FALSE}
-
-dl <- c(
-  tweets =  "https://files.pushshift.io/misc/political_tweets.ndjson.xz"
-  voteview = "https://voteview.com/static/db/current.zip"
-  )
-
-walk2(dl, names(dl), 
-  ~download.file(
-    url = .x,
-    destfile = here("raw", basename(.y))
-    )
-  )
-
-unzip(here("raw", "current.zip"), overwrite = TRUE, exdir = here("raw", "voteview"))
-
-```
-
-
-## twitter data
-
-Tweets are the history of tweets for any member of the 115th Congress, plus other contemporaneous active political figures
-
-
-```{bash, eval=FALSE}
-
-# uncompress with xz
-
-unxz political_tweets.ndjson.xz
+# unxz in WSL
+# unxz political_tweets.ndjson.xz
 
 # pull the frst and last
-
-head -n 1 raw/political_tweets.ndjson > raw/first.ndjson
-tail -n 1 raw/political_tweets.ndjson > raw/last.ndjson
-
-```
-
-### get an idea for what twitter data looks like
-
-```{r}
-c("raw/first.ndjson", "raw/last.ndjson") %>%
-  map(read_json) %>%
-  walk(str)
-```
-
-### use `jq` to grab the full tweet text
-
-```{bash, eval=FALSE}
-
-cat raw/political_tweets.ndjson | jq -c '{ handle : .user.screen_name, tweeted_at : .created_at, full_text : .full_text, lang: .lang }' > raw/tweet_text.ndjson
-```
+# head -n 1 political_tweets.ndjson > some_tweets.ndjson
 
 
-```{r}
+# c("raw/first.ndjson", "raw/last.ndjson") %>%
+#   map(read_json) %>%
+#   walk(str)
 tweets <- stream_in(file("raw/tweet_text.ndjson"))
+# write_rds(tweets, "raw/tweets.rds")
+
 remove_regex <- "&amp;|&lt;|&gt;"
 
 x <- tweets %>%
-  mutate(
-    time_of_tweet = parse_date_time(tweeted_at, "abdHMszY"),
-    tweet_month = month(time_of_tweet),
-    tweet_year = year(time_of_tweet)
-  ) %>%
-  filter(!str_detect(full_text, "^RT")) %>%
+  # mutate(
+  #   time_of_tweet = parse_date_time(tweeted_at, "abdHMszY"),
+  #   tweet_month = month(time_of_tweet),
+  #   tweet_year = year(time_of_tweet)
+  # ) %>%
+  # filter(!str_detect(full_text, "^RT")) %>%
   mutate(full_text = str_remove_all(full_text, remove_regex)) %>%
   unnest_tokens(word, full_text, token = "tweets") %>%
   anti_join(stop_words)
-```
 
-## voteview data
+library(mongolite)
 
-DW nominate scores are provided in batch as mongoDB BSON files, so start a local mongo instance to view members collection
-
-```{bash, eval=FALSE}
-docker run -d --rm -p 27017:27017 mongo
-```
-
-### load data into mongo and extract info
-
-```{r}
 m <- mongo("members", "voteview", url = "mongodb://localhost:27017")
 m$import(file(here::here("raw", "voteview", "dump", "voteview", "voteview_members.bson")), bson = TRUE)
 
@@ -137,21 +68,9 @@ members <-
     )
   ) %>%
   select(party, left_right = dim1, handle = twitter, bioname, chamber)
-```
 
-Combine tweets with voteview info
-
-```{r}
 tidied <- inner_join(x, members, by = "handle")
-```
 
-## plots
-
-### relatve frequency
-
-Words used by both partisans, by relative frequency
-
-```{r}
 freq <- tidied %>%
   group_by(party) %>%
   count(word, sort = TRUE) %>%
@@ -159,12 +78,8 @@ freq <- tidied %>%
   mutate(freq = n/total) %>%
   select(party, word, freq) %>%
   spread(party, freq)
-```
 
-### plot 1
-
-```{r, fig.width=10,fig.height=11}
-
+library(scales)
 freq %>%
   drop_na() %>%
 ggplot(., aes(D, R)) +
@@ -177,13 +92,12 @@ ggplot(., aes(D, R)) +
     title = "Building a partisan vocabulary:",
     subtitle = "Relative frequencies of words mentioned by members of Congress on Twitter"
   )
-```
 
-### salient words by chamber and party
 
-```{r}
+## salient words by chamber and party
+
 tfidf <-
-  tidied %>%
+  with_party %>%
   mutate(chamber_party = str_c(party,"-", chamber)) %>%
   group_by(chamber_party, word) %>%
   summarise(
@@ -196,12 +110,6 @@ tfidf <-
 top_tfidf <- tfidf %>%
   group_by(chamber_party) %>%
   top_n(100, tf_idf)
-```
-
-
-### plot 2
-
-```{r, fig.width=10,fig.height=11}
 
 top_tfidf %>%
   drop_na(word) %>%
@@ -224,5 +132,3 @@ top_tfidf %>%
     y = "TF / IDF"
   ) +
   theme_minimal()
-
-```
