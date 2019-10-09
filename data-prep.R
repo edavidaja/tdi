@@ -2,11 +2,27 @@ library(mongolite)
 library(lubridate)
 library(tidyverse)
 library(tidytext)
-library(tidylo)
+library(rvest)
 
+dl <- c(
+  tweets =  "https://files.pushshift.io/misc/political_tweets.ndjson.xz",
+  voteview = "https://voteview.com/static/db/current.zip"
+)
 
-if (file.exists("data/tweets.qs")) {
-  tweets <- qs::qread("data/tweets.qs")
+walk2(
+  dl,
+  names(dl),
+  ~download.file(
+    url = .x,
+    destfile = here("data-raw", basename(.y))
+    )
+  )
+
+unzip(here("data-raw", "current.zip"), overwrite = TRUE, exdir = here("data-raw", "voteview"))
+
+tweet_file <- here::here("data", "tweets.qs")
+if (file.exists(tweet_file)) {
+  tweets <- qs::qread(tweet_file)
 } else {
   container <- system("docker run -d --rm -p 27017:27017 mongo")
   m <- mongo("tweets", "capstone", url = "mongodb://localhost:27017")
@@ -31,13 +47,40 @@ if (file.exists("data/tweets.qs")) {
       user = flatten_chr(user)
     )
 
-  qs::qsave(tweets, "data/tweets.qs")
+  qs::qsave(tweets, tweet_file)
   m$disconnect()
   system(paste0("docker stop ", container))
 }
 
+voteview_file <- here::here("data", "voteview_115_congress.qs")
+if (file.exists(voteview_file)) {
+  cong_115 <- qs::qread(voteview_file)
+} else {
+  container <- system("docker run -d --rm -p 27017:27017 mongo")
+  m <- mongo("tweets", "capstone", url = "mongodb://localhost:27017")
+  m$import(
+    file(here::here(
+      "data-raw", "voteview", "dump", "voteview", "voteview_members.bson"
+      )),
+    bson = TRUE
+    )
 
-cong_115 <- qs::qread("data/voteview_115_congress.qs")
+  cong_115 <- m$find(
+    query ='{"congress": 115}',
+    fields = '{
+      "twitter" : true,
+      "chamber" : true,
+      "party_code" : true,
+      "nominate" : true,
+      "bioname"  : true,
+      "_id": false
+      }'
+    )
+  qs::qsave(cong_115, voteview_file)
+  m$disconnect()
+  system(paste0("docker stop ", container))
+}
+
 cong_115 <- cong_115 %>%
   filter(!is.na(twitter), twitter != "") %>%
   mutate(
@@ -53,37 +96,40 @@ cong_115 <- cong_115 %>%
     )
   )
 
-tweets <- inner_join(tweets, cong_115, by = c("user" = "twitter"))
+tagged_tweets <- inner_join(tweets, cong_115, by = c("user" = "twitter"))
 
-remove_regex <- "&amp;|&lt;|&gt;"
+qs::qsave(tagged_tweets, here::here("data", "tagged_tweets.qs"))
 
-tweets <- tweets %>%
+demonyms_link <- "https://en.wikipedia.org/wiki/List_of_demonyms_for_U.S._states_and_territories"
+
+footnotes <- regex(
+  "
+  (   # start capture group
+  \\( # opening parens
+  |   # or
+  \\[ # opening bracket
+  )   # end capture group
+  .+  # anything within parens
+  (   # cgroup2
+  \\] # end bracket
+  |   # or
+  \\) # end parens
+  )   # cgroup2
+  ",
+  comments = TRUE
+)
+
+demonyms <- read_html(demonyms_link) %>%
+  html_node("table") %>%
+  html_table() %>%
+  rename(state = 1, demonym = 2, alts = 3) %>%
+  mutate(alts = str_remove_all(alts, footnotes)) %>%
+  separate_rows(alts, sep = ",|\\bor\\b") %>%
   mutate(
-    created_at = parse_date_time(created_at, "abdHMszY")
+    alts = str_remove_all(alts, "^[A-z ]+:")
   ) %>%
-  # drop retweets
-  filter(!str_detect(full_text, "^RT")) %>%
-  mutate(full_text = str_remove_all(full_text, remove_regex)) %>%
-  unnest_tokens(word, full_text, token = "tweets") %>%
-  group_by(word) %>%
-  filter(n() > 10) %>%
-  ungroup() %>%
-  anti_join(get_stopwords())
+  mutate_all(str_trim) %>%
+  flatten_chr() %>%
+  unique()
 
-qs::qsave(tweets, "data/tokenized-tweets.qs")
-
-word_counts <-
-  tweets %>%
-  count(party_code, word, sort = TRUE) %>%
-  bind_tf_idf(word, party_code, n) %>%
-  bind_log_odds(word, party_code, n)
-
-top_15 <-
-word_counts %>%
-  filter(log_odds > 1) %>%
-  mutate(word = fct_reorder(word, log_odds))
-
-ggplot(top_15, aes(word, log_odds, color = party_code)) +
-  geom_point() +
-  facet_wrap(~party_code, scales = "free_y") +
-  coord_flip()
+qs::qsave(demonyms[demonyms != ""], here::here("data", "demonyms.qs"))
